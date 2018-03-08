@@ -724,21 +724,37 @@ int modbus_rtu_set_serial_mode(modbus_t *ctx, int mode)
         struct serial_rs485 rs485conf;
         memset(&rs485conf, 0x0, sizeof(struct serial_rs485));
 
-        if (mode == MODBUS_RTU_RS485) {
-            rs485conf.flags = SER_RS485_ENABLED;
-            if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
-                return -1;
-            }
+        switch(mode) {
+        	case MODBUS_RTU_RS232:
+                if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
+                    return -1;
+                }
 
-            ctx_rtu->serial_mode |= MODBUS_RTU_RS485;
-            return 0;
-        } else if (mode == MODBUS_RTU_RS232) {
-            if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
-                return -1;
-            }
+                ctx_rtu->serial_mode = MODBUS_RTU_RS232;
+                return 0;
 
-            ctx_rtu->serial_mode = MODBUS_RTU_RS232;
-            return 0;
+        	case MODBUS_RTU_RS485:
+                rs485conf.flags = SER_RS485_ENABLED;
+                if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
+                    return -1;
+                }
+
+                ctx_rtu->serial_mode |= MODBUS_RTU_RS485;
+                return 0;
+
+        	case MODBUS_RTU_RS485_DRC01:
+                rs485conf.flags = SER_RS485_ENABLED;
+            	rs485conf.flags |= SER_RS485_RTS_ON_SEND;
+
+                if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
+                    return -1;
+                }
+
+                ctx_rtu->serial_mode |= MODBUS_RTU_RS485;
+                return 0;
+
+        	default:
+        		break;
         }
 #else
         if (ctx->debug) {
