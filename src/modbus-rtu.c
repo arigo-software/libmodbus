@@ -910,13 +910,16 @@ int modbus_rtu_set_serial_mode(modbus_t *ctx, int mode)
         modbus_rtu_t *ctx_rtu = ctx->backend_data;
         struct serial_rs485 rs485conf;
 
-        if (mode == MODBUS_RTU_RS485) {
+        if (mode == MODBUS_RTU_RS485 || mode == MODBUS_RTU_RS485_DRC01) {
             // Get
             if (ioctl(ctx->s, TIOCGRS485, &rs485conf) < 0) {
                 return -1;
             }
             // Set
             rs485conf.flags |= SER_RS485_ENABLED;
+            if (mode == MODBUS_RTU_RS485_DRC01) {
+                rs485conf.flags |= SER_RS485_RTS_ON_SEND;
+            }
             if (ioctl(ctx->s, TIOCSRS485, &rs485conf) < 0) {
                 return -1;
             }
