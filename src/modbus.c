@@ -33,6 +33,9 @@ const unsigned int libmodbus_version_micro = LIBMODBUS_VERSION_MICRO;
 
 /* Max between RTU and TCP max adu length (so TCP) */
 #define MAX_MESSAGE_LENGTH 260
+#define MAX_EXTENDED_PAYLOAD_LENGTH 514
+#define MAX_EXTENDED_PAYLOAD_OFFSET 16
+#define MAX_EXTENDED_MESSAGE_LENGTH (MAX_EXTENDED_PAYLOAD_LENGTH + MAX_EXTENDED_PAYLOAD_OFFSET)
 
 /* 3 steps are used to parse the query */
 typedef enum {
@@ -154,6 +157,10 @@ static unsigned int compute_response_length_from_request(modbus_t *ctx, uint8_t 
         return MSG_LENGTH_UNDEFINED;
     case MODBUS_FC_MASK_WRITE_REGISTER:
         length = 7;
+        break;
+    case MODBUS_FC_READ_OBJECT:
+    case MODBUS_FC_WRITE_OBJECT:
+        length = 0;
         break;
     default:
         length = 5;
@@ -280,6 +287,12 @@ static uint8_t compute_meta_length_after_function(int function,
         case MODBUS_FC_MASK_WRITE_REGISTER:
             length = 6;
             break;
+        case MODBUS_FC_READ_OBJECT:
+            length = 2;
+            break;
+        case MODBUS_FC_WRITE_OBJECT:
+            length = 4;
+            break;
         default:
             length = 1;
         }
@@ -287,6 +300,8 @@ static uint8_t compute_meta_length_after_function(int function,
 
     return length;
 }
+
+#define MODBUS_ESME_OBJECT_BYTES_AFTER_LENGTH_DIFF 4
 
 /* Computes the length to read after the meta information (address, count, etc) */
 static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
@@ -313,6 +328,19 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
             function == MODBUS_FC_REPORT_SLAVE_ID ||
             function == MODBUS_FC_WRITE_AND_READ_REGISTERS) {
             length = msg[ctx->backend->header_length + 1];
+        } else if (function == MODBUS_FC_READ_OBJECT) {
+            if (ctx->debug) {
+                printf("compute_data_length_after_meta backend header len=%d [%.2X %.2X %.2X %.2X]\n", ctx->backend->header_length,
+                    msg[ctx->backend->header_length],msg[ctx->backend->header_length+1],
+                    msg[ctx->backend->header_length+2],msg[ctx->backend->header_length+3]);
+            }
+            length = msg[ctx->backend->header_length + 1] << 8 | msg[ctx->backend->header_length + 2];
+            if (ctx->debug) {
+                printf("compute_data_length_after_meta length=%d\n", length);
+            }
+            if (length >= MODBUS_ESME_OBJECT_BYTES_AFTER_LENGTH_DIFF) {
+                length -= MODBUS_ESME_OBJECT_BYTES_AFTER_LENGTH_DIFF;
+            }
         } else {
             length = 0;
         }
@@ -550,10 +578,12 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
         }
     }
 
+    int isEsmeReadWriteObject = function == MODBUS_FC_READ_OBJECT || function == MODBUS_FC_WRITE_OBJECT;
+
     /* Check length */
-    if ((rsp_length == rsp_length_computed ||
+    if (((rsp_length == rsp_length_computed ||
          rsp_length_computed == MSG_LENGTH_UNDEFINED) &&
-        function < 0x80) {
+        function < 0x80) || isEsmeReadWriteObject) {
         int req_nb_value;
         int rsp_nb_value;
 
@@ -599,6 +629,29 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
         case MODBUS_FC_REPORT_SLAVE_ID:
             /* Report slave ID (bytes received) */
             req_nb_value = rsp_nb_value = rsp[offset + 1];
+            break;
+        case MODBUS_FC_READ_OBJECT:
+            if (ctx->debug) {
+                printf("Read Object Response: %.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X\n",
+                        rsp[offset], rsp[offset + 1], rsp[offset + 2], rsp[offset + 3],
+                        rsp[offset + 4], rsp[offset + 5], rsp[offset + 6], rsp[offset + 7]);
+            }
+            uint16_t frameLength = (rsp[offset + 1] << 8) | rsp[offset + 2];
+            if (ctx->debug) {
+                printf("Read Object Response: frameLength=%d version=%d type=%d field=%d total=%d read=%d first_ix=%d v[0]=%.2X v[1]=%.2X\n",
+                    frameLength, rsp[offset + 3], rsp[offset + 4],
+                    rsp[offset + 5]<<8 | rsp[offset + 6],
+                    rsp[offset + 7]<<8 | rsp[offset + 8],
+                    rsp[offset + 9]<<8 | rsp[offset + 10],
+                    rsp[offset + 11]<<8 | rsp[offset + 12],
+                    rsp[offset + 13], rsp[offset + 14]);
+            }
+            rsp_nb_value = frameLength;
+            req_nb_value = rsp_nb_value;
+            break;
+        case MODBUS_FC_WRITE_OBJECT:
+            rsp_nb_value =  (rsp[offset + 1] << 8) | rsp[offset + 2];
+            req_nb_value = 6;
             break;
         default:
             /* 1 Write functions & others */
@@ -1234,6 +1287,167 @@ int modbus_read_input_registers(modbus_t *ctx, int addr, int nb,
                             addr, nb, dest);
 
     return status;
+}
+
+/* Reads the objects of remote device and put the data into an array */
+int modbus_read_objects(modbus_t *ctx, uint8_t type,
+                        uint16_t field, uint16_t start, uint8_t count,
+                        uint16_t len, uint8_t *dest)
+{
+    int rc;
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (dest == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (start > UINT16_MAX - count) {
+        fprintf(stderr, "ERROR Overflow: start (%d) + count (%d) exceeds UINT16_MAX (%d)\n", start, count, UINT16_MAX);
+        errno = EMBMDATA;
+        return -1;
+    }
+
+    if (count < 1) {
+        fprintf(stderr, "ERROR Cannot read 0 objects\n");
+        errno = EMBMDATA;
+        return -1;
+    }
+
+    int req_length;
+    int read_obj_frame_length = 12;
+    uint8_t req[MAX_MESSAGE_LENGTH];
+    uint8_t rsp[MAX_EXTENDED_MESSAGE_LENGTH];
+
+    uint16_t end = start + count - 1;
+
+    /* len is at addr-position, version=1 and type are at nb-position  */
+    req_length = ctx->backend->build_request_basis(ctx, MODBUS_FC_READ_OBJECT, read_obj_frame_length, (int)0x0100|(int)type, req);
+    req[req_length++] = (field >> 8);
+    req[req_length++] = (field & 0xFF);
+    req[req_length++] = (start >> 8);
+    req[req_length++] = (start & 0xFF);
+    req[req_length++] = (end >> 8);
+    req[req_length++] = (end & 0xFF);
+
+    rc = send_msg(ctx, req, req_length);
+    if (rc > 0) {
+        int offset;
+        int i;
+
+        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        if (rc == -1)
+            return -1;
+
+        rc = check_confirmation(ctx, req, rsp, rc);
+
+        if (rc == -1)
+            return -1;
+
+        offset = ctx->backend->header_length;
+
+        if (ctx->debug) {
+            printf("modbus_read_objects rc=%d :",rc);
+            for (i = 0; i < rc; i++) {
+                printf("%.2X ",rsp[offset + i]);
+            }
+            printf("\n");
+        }
+        uint8_t func = rsp[offset];
+        uint16_t frameLength = (rsp[offset + 1] << 8) | rsp[offset + 2];
+        uint8_t version = rsp[offset + 3];
+        uint8_t objType = rsp[offset + 4];
+        uint16_t objField = (rsp[offset + 5] << 8) | rsp[offset + 6];
+        uint16_t total = (rsp[offset + 7] << 8) | rsp[offset + 8];
+        uint16_t read = (rsp[offset + 9] << 8) | rsp[offset + 10];
+        uint16_t first_ix = (rsp[offset + 11] << 8) | rsp[offset + 12];
+        uint8_t v0 = rsp[offset + 13];
+        uint8_t v1 = rsp[offset + 14];
+        if (ctx->debug) {
+            printf("modbus_read_objects rc=%d, func=%.2X frameLength=%d version=%d type=%d field=%d total=%d read=%d first_ix=%d v[0]=%.2X v[1]=%.2X\n",
+                rc, func, frameLength, version, objType, objField, total, read, first_ix, v0, v1);
+        }
+        uint8_t data_offset = 11;
+        rc -= data_offset;
+        rc -= 1; // FIXME: not quite sure where we have got this additional byte in the calculation
+
+        for (i = 0; i < rc; i++) {
+            dest[i] = rsp[offset + data_offset + i];
+        }
+    }
+
+    return rc;
+}
+
+/* Writes the objects to remote device */
+int modbus_write_objects(modbus_t *ctx, uint8_t type, uint16_t field, uint16_t obj_count, uint16_t len, uint8_t *data)
+{
+    int rc;
+    int req_length;
+    int data_offset = MAX_EXTENDED_PAYLOAD_OFFSET;
+    int write_obj_frame_length = data_offset + len;
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (data == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (write_obj_frame_length > MAX_EXTENDED_MESSAGE_LENGTH) {
+        fprintf(stderr, "ERROR Data size exceeds limit (%d > %d)\n", len, MAX_EXTENDED_MESSAGE_LENGTH - data_offset);
+        errno = EMBMDATA;
+        return -1;
+    }
+
+    uint8_t req[MAX_EXTENDED_MESSAGE_LENGTH];
+
+    if (ctx == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    req_length = ctx->backend->build_request_basis(ctx, MODBUS_FC_WRITE_OBJECT, write_obj_frame_length, (int)0x0100|(int)type, req);
+    req[req_length++] = (field >> 8);
+    req[req_length++] = (field & 0xFF);
+    req[req_length++] = (obj_count >> 8);
+    req[req_length++] = (obj_count & 0xFF);
+
+    if (req_length + len > MAX_EXTENDED_MESSAGE_LENGTH) {
+        fprintf(stderr, "ERROR Request length exceeds limit (%d > %d)\n", req_length + len, MAX_EXTENDED_MESSAGE_LENGTH);
+        errno = EMBMDATA;
+        return -1;
+    }
+
+    memcpy(&req[req_length], data, len);
+    req_length += len;
+    if (ctx->debug) {
+        printf("modbus_write_objects req_length=%d :",req_length);
+        for (int i = 0; i < req_length; i++) {
+            printf("%.2X ",req[i]);
+        }
+        printf("\n");
+    }
+    rc = send_msg(ctx, req, req_length);
+    if (ctx->debug) {
+        printf("modbus_write_objects rc=%d\n",rc);
+    }
+    if (rc > 0) {
+        uint8_t rsp[MAX_MESSAGE_LENGTH];
+        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        if (rc == -1)
+            return -1;
+        rc = check_confirmation(ctx, req, rsp, rc);
+    }
+
+    return rc;
 }
 
 /* Write a value to the specified register of the remote device.
