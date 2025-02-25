@@ -1357,8 +1357,13 @@ int modbus_read_objects(modbus_t *ctx, uint8_t type,
             }
             printf("\n");
         }
+        // workaround for UC3 devices: we will use the length of the header instead of the length of the frame (which is the same)
+        int8_t lengthOffset = 0;
+        if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) {
+            lengthOffset = -4;
+        }
         uint8_t func = rsp[offset];
-        uint16_t frameLength = (rsp[offset + 1] << 8) | rsp[offset + 2];
+        uint16_t frameLength = (rsp[offset + 1 + lengthOffset] << 8) | rsp[offset + 2 + lengthOffset];
         uint8_t version = rsp[offset + 3];
         uint8_t objType = rsp[offset + 4];
         uint16_t objField = (rsp[offset + 5] << 8) | rsp[offset + 6];
