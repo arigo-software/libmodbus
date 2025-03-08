@@ -302,6 +302,7 @@ static uint8_t compute_meta_length_after_function(int function,
 }
 
 #define MODBUS_ESME_OBJECT_BYTES_AFTER_LENGTH_DIFF 4
+#define MODBUS_ESME_OBJECT_LENGTH_OFFSET_UC3_WORKAROUND (-4)
 
 /* Computes the length to read after the meta information (address, count, etc) */
 static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
@@ -330,9 +331,21 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
             length = msg[ctx->backend->header_length + 1];
         } else if (function == MODBUS_FC_READ_OBJECT) {
             if (ctx->debug) {
-                printf("compute_data_length_after_meta backend header len=%d [%.2X %.2X %.2X %.2X]\n", ctx->backend->header_length,
+                printf("compute_data_length_after_meta backend header [type %d] len=%d [%.2X %.2X %.2X %.2X]\n", ctx->backend->backend_type, ctx->backend->header_length,
                     msg[ctx->backend->header_length],msg[ctx->backend->header_length+1],
                     msg[ctx->backend->header_length+2],msg[ctx->backend->header_length+3]);
+            }
+            if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) {
+                // workaround for UC3 devices: we will use the length of the header instead of the length of the frame (which is the same)
+                if (msg[ctx->backend->header_length + 1] != msg[ctx->backend->header_length + 1 + MODBUS_ESME_OBJECT_LENGTH_OFFSET_UC3_WORKAROUND] &&
+                    msg[ctx->backend->header_length + 2] != msg[ctx->backend->header_length + 2 + MODBUS_ESME_OBJECT_LENGTH_OFFSET_UC3_WORKAROUND])
+                {
+                    if (ctx->debug) {
+                        printf("correcting invalid length in read object response\n");
+                    }
+                    msg[ctx->backend->header_length + 1] = msg[ctx->backend->header_length + 1 + MODBUS_ESME_OBJECT_LENGTH_OFFSET_UC3_WORKAROUND];
+                    msg[ctx->backend->header_length + 2] = msg[ctx->backend->header_length + 2 + MODBUS_ESME_OBJECT_LENGTH_OFFSET_UC3_WORKAROUND];
+                }
             }
             length = msg[ctx->backend->header_length + 1] << 8 | msg[ctx->backend->header_length + 2];
             if (ctx->debug) {
@@ -632,7 +645,8 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
             break;
         case MODBUS_FC_READ_OBJECT:
             if (ctx->debug) {
-                printf("Read Object Response: %.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X\n",
+                printf("Read Object Response: [type %d] [offset %d] %.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X\n",
+                        ctx->backend->backend_type, offset,
                         rsp[offset], rsp[offset + 1], rsp[offset + 2], rsp[offset + 3],
                         rsp[offset + 4], rsp[offset + 5], rsp[offset + 6], rsp[offset + 7]);
             }
@@ -1351,19 +1365,14 @@ int modbus_read_objects(modbus_t *ctx, uint8_t type,
         offset = ctx->backend->header_length;
 
         if (ctx->debug) {
-            printf("modbus_read_objects rc=%d :",rc);
+            printf("modbus_read_objects [type %d][offset %d] rc=%d :", ctx->backend->backend_type, offset, rc);
             for (i = 0; i < rc; i++) {
                 printf("%.2X ",rsp[offset + i]);
             }
             printf("\n");
         }
-        // workaround for UC3 devices: we will use the length of the header instead of the length of the frame (which is the same)
-        int8_t lengthOffset = 0;
-        if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) {
-            lengthOffset = -4;
-        }
         uint8_t func = rsp[offset];
-        uint16_t frameLength = (rsp[offset + 1 + lengthOffset] << 8) | rsp[offset + 2 + lengthOffset];
+        uint16_t frameLength = (rsp[offset + 1] << 8) | rsp[offset + 2];
         uint8_t version = rsp[offset + 3];
         uint8_t objType = rsp[offset + 4];
         uint16_t objField = (rsp[offset + 5] << 8) | rsp[offset + 6];
