@@ -101,6 +101,11 @@ struct _modbus {
     struct timeval indication_timeout;
     const modbus_backend_t *backend;
     void *backend_data;
+	/* Callbacks for data received and sent */
+    dataCallback_t data_received_callback;	// Callback for data received
+	void *data_received_callback_user_data;	// User data for the received callback
+    dataCallback_t data_sent_callback;	 // Callback for data sent
+	void *data_sent_callback_user_data;	 // User data for the sent callback
 };
 
 void _modbus_init_common(modbus_t *ctx);

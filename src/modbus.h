@@ -178,6 +178,8 @@ typedef enum
     MODBUS_ERROR_RECOVERY_PROTOCOL      = (1<<2)
 } modbus_error_recovery_mode;
 
+typedef void(*dataCallback_t)(const uint8_t *data, int data_length, void* user_data);
+
 MODBUS_API int modbus_set_slave(modbus_t* ctx, int slave);
 MODBUS_API int modbus_get_slave(modbus_t* ctx);
 MODBUS_API int modbus_set_error_recovery(modbus_t *ctx, modbus_error_recovery_mode error_recovery);
@@ -289,6 +291,11 @@ MODBUS_API void modbus_set_float_dcba(float f, uint16_t *dest);
 MODBUS_API void modbus_set_float_badc(float f, uint16_t *dest);
 MODBUS_API void modbus_set_float_cdab(float f, uint16_t *dest);
 
+MODBUS_API void modbus_register_data_received_callback(modbus_t *ctx,
+                            dataCallback_t data_receive_callback, void* data_received_user_arg);
+MODBUS_API void modbus_register_data_sent_callback(modbus_t *ctx,
+                            dataCallback_t data_send_callback, void* data_sent_user_arg);
+                                               
 #include "modbus-tcp.h"
 #include "modbus-rtu.h"
 

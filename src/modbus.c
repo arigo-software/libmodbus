@@ -203,6 +203,12 @@ static int send_msg(modbus_t *ctx, uint8_t *msg, int msg_length)
                 errno = saved_errno;
             }
         }
+        else {
+            if(ctx->data_sent_callback) {
+           	    /* Call the data send callback if set */
+                ctx->data_sent_callback(msg, msg_length, ctx->data_sent_callback_user_data);
+            }
+        }
     } while ((ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) &&
              rc == -1);
 
@@ -517,6 +523,10 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
     if (ctx->debug)
         printf("\n");
 
+    if(ctx->data_received_callback && msg_length > 0) {
+        /* Call the data receive callback if set */
+        ctx->data_received_callback(msg, msg_length, ctx->data_received_callback_user_data);
+    }
     return ctx->backend->check_integrity(ctx, msg, msg_length);
 }
 
@@ -528,7 +538,12 @@ int modbus_receive(modbus_t *ctx, uint8_t *req)
         return -1;
     }
 
-    return ctx->backend->receive(ctx, req);
+    int msgLength = ctx->backend->receive(ctx, req);
+    if (ctx->data_received_callback && msgLength > 0) {
+        /* Call the data receive callback if set */
+        ctx->data_received_callback(req, msgLength, ctx->data_received_callback_user_data);
+    }
+    return msgLength;
 }
 
 /* Receives the confirmation.
@@ -1806,6 +1821,11 @@ void _modbus_init_common(modbus_t *ctx)
 
     ctx->indication_timeout.tv_sec = 0;
     ctx->indication_timeout.tv_usec = 0;
+    
+    ctx->data_received_callback = NULL;
+	ctx->data_received_callback_user_data = NULL;
+    ctx->data_sent_callback = NULL;
+	ctx->data_sent_callback_user_data = NULL;
 }
 
 /* Define the slave number */
@@ -2097,6 +2117,27 @@ void modbus_mapping_free(modbus_mapping_t *mb_mapping)
     free(mb_mapping->tab_input_bits);
     free(mb_mapping->tab_bits);
     free(mb_mapping);
+}
+
+
+void modbus_register_data_received_callback(modbus_t *ctx,
+                            dataCallback_t data_receive_callback, void* data_received_user_arg)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	ctx->data_received_callback = data_receive_callback;
+	ctx->data_received_callback_user_data = data_received_user_arg;
+}
+
+void modbus_register_data_sent_callback(modbus_t *ctx,
+                            dataCallback_t data_send_callback, void* data_sent_user_arg)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	ctx->data_sent_callback = data_send_callback;
+	ctx->data_sent_callback_user_data = data_sent_user_arg;
 }
 
 #ifndef HAVE_STRLCPY
