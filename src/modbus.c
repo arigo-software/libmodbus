@@ -33,8 +33,8 @@ const unsigned int libmodbus_version_micro = LIBMODBUS_VERSION_MICRO;
 
 /* Max between RTU and TCP max adu length (so TCP) */
 #define MAX_MESSAGE_LENGTH 260
-#define MAX_EXTENDED_PAYLOAD_LENGTH 514
-#define MAX_EXTENDED_PAYLOAD_OFFSET 16
+#define MAX_EXTENDED_PAYLOAD_LENGTH 512
+#define MAX_EXTENDED_PAYLOAD_OFFSET 10
 #define MAX_EXTENDED_MESSAGE_LENGTH (MAX_EXTENDED_PAYLOAD_LENGTH + MAX_EXTENDED_PAYLOAD_OFFSET)
 
 /* 3 steps are used to parse the query */
