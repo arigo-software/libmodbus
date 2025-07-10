@@ -87,6 +87,7 @@ typedef struct _modbus_backend {
     int (*flush) (modbus_t *ctx);
     int (*select) (modbus_t *ctx, fd_set *rset, struct timeval *tv, int msg_length);
     void (*free) (modbus_t *ctx);
+	const char* (*getAddress) (modbus_t *ctx); // Function to get the IP address for TCP connections
 } modbus_backend_t;
 
 struct _modbus {

@@ -178,7 +178,7 @@ typedef enum
     MODBUS_ERROR_RECOVERY_PROTOCOL      = (1<<2)
 } modbus_error_recovery_mode;
 
-typedef void(*dataCallback_t)(const uint8_t *data, int data_length, void* user_data);
+typedef void(*dataCallback_t)(const uint8_t *data, int data_length, int isClient, const char* ipAddress, void* user_data);
 
 MODBUS_API int modbus_set_slave(modbus_t* ctx, int slave);
 MODBUS_API int modbus_get_slave(modbus_t* ctx);

@@ -1199,6 +1199,21 @@ static void _modbus_rtu_free(modbus_t *ctx) {
     free(ctx);
 }
 
+static const char* _modbus_rtu_getAddress(modbus_t *ctx)
+{
+	if (ctx == NULL || ctx->backend_data == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (ctx->backend->backend_type != _MODBUS_BACKEND_TYPE_RTU) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	return ((modbus_rtu_t *)ctx->backend_data)->device;
+}
+
 const modbus_backend_t _modbus_rtu_backend = {
     _MODBUS_BACKEND_TYPE_RTU,
     _MODBUS_RTU_HEADER_LENGTH,
@@ -1218,7 +1233,8 @@ const modbus_backend_t _modbus_rtu_backend = {
     _modbus_rtu_close,
     _modbus_rtu_flush,
     _modbus_rtu_select,
-    _modbus_rtu_free
+    _modbus_rtu_free,
+	_modbus_rtu_getAddress
 };
 
 modbus_t* modbus_new_rtu(const char *device,

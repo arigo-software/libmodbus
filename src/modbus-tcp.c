@@ -744,6 +744,57 @@ static void _modbus_tcp_free(modbus_t *ctx) {
     free(ctx);
 }
 
+static const char* _modbus_tcp_pi_getAddress(modbus_t *ctx)
+{
+	if (ctx == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (ctx->backend == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+	if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) 
+	{
+		modbus_tcp_pi_t *ctx_tcp_pi = ctx->backend_data;
+		if (ctx_tcp_pi == NULL) {
+			errno = EINVAL;
+			return NULL;
+		}
+		return ctx_tcp_pi->node;
+	} else {
+		errno = EINVAL;
+		return NULL;
+	}
+}
+
+static const char* _modbus_tcp_getAddress(modbus_t *ctx)
+{
+	if (ctx == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (ctx->backend == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+	if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_TCP) 
+	{
+		modbus_tcp_t *ctx_tcp = ctx->backend_data;
+		if (ctx_tcp == NULL) {
+			errno = EINVAL;
+			return NULL;
+		}
+		return ctx_tcp->ip;
+	}
+	else {
+		errno = EINVAL;
+		return NULL;
+	}
+}
+
 const modbus_backend_t _modbus_tcp_backend = {
     _MODBUS_BACKEND_TYPE_TCP,
     _MODBUS_TCP_HEADER_LENGTH,
@@ -763,7 +814,8 @@ const modbus_backend_t _modbus_tcp_backend = {
     _modbus_tcp_close,
     _modbus_tcp_flush,
     _modbus_tcp_select,
-    _modbus_tcp_free
+    _modbus_tcp_free,
+	_modbus_tcp_getAddress
 };
 
 
@@ -786,7 +838,8 @@ const modbus_backend_t _modbus_tcp_pi_backend = {
     _modbus_tcp_close,
     _modbus_tcp_flush,
     _modbus_tcp_select,
-    _modbus_tcp_free
+    _modbus_tcp_free,
+	_modbus_tcp_pi_getAddress
 };
 
 modbus_t* modbus_new_tcp(const char *ip, int port)
