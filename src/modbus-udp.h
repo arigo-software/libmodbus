@@ -31,7 +31,7 @@ MODBUS_BEGIN_DECLS
 #endif
 #endif
 
-#define MODBUS_UDP_DEFAULT_PORT   502
+#define MODBUS_UDP_DEFAULT_PORT   504
 #define MODBUS_UDP_SLAVE         0xFF
 
 /* UDP payload size (conservative for wide compatibility) */

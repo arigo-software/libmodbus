@@ -513,7 +513,7 @@ int modbus_udp_pi_bind(modbus_t *ctx)
     }
 
     if (ctx_udp_pi->service[0] == 0) {
-        service = "502";
+        service = "504";
     } else {
         service = ctx_udp_pi->service;
     }

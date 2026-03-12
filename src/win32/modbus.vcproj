@@ -399,6 +399,10 @@
 				>
 			</File>
 			<File
+				RelativePath="..\modbus-udp.c"
+				>
+			</File>
+			<File
 				RelativePath="..\modbus.c"
 				>
 			</File>
@@ -430,6 +434,14 @@
 			</File>
 			<File
 				RelativePath="..\modbus-tcp.h"
+				>
+			</File>
+			<File
+				RelativePath="..\modbus-udp-private.h"
+				>
+			</File>
+			<File
+				RelativePath="..\modbus-udp.h"
 				>
 			</File>
 			<File
