@@ -402,6 +402,59 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         }
     }
 
+    /* UDP is datagram-based - must read complete datagram in one call */
+    if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_UDP) {
+        if (msg_type == MSG_INDICATION) {
+            /* Wait for indication with select */
+            tv.tv_sec = ctx->indication_timeout.tv_sec;
+            tv.tv_usec = ctx->indication_timeout.tv_usec;
+            p_tv = (tv.tv_sec == 0 && tv.tv_usec == 0) ? NULL : &tv;
+        } else {
+            /* Wait for confirmation with response timeout */
+            tv.tv_sec = ctx->response_timeout.tv_sec;
+            tv.tv_usec = ctx->response_timeout.tv_usec;
+            p_tv = &tv;
+        }
+
+        FD_ZERO(&rset);
+        FD_SET(ctx->s, &rset);
+
+        rc = ctx->backend->select(ctx, &rset, p_tv, ctx->backend->max_adu_length);
+        if (rc == -1) {
+            _error_print(ctx, "select");
+            if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) {
+                int saved_errno = errno;
+                if (errno == ETIMEDOUT) {
+                    _sleep_response_timeout(ctx);
+                    modbus_flush(ctx);
+                }
+                errno = saved_errno;
+            }
+            return -1;
+        }
+
+        /* Read complete UDP datagram in one call */
+        rc = ctx->backend->recv(ctx, msg, ctx->backend->max_adu_length);
+        if (rc == -1) {
+            _error_print(ctx, "recv");
+            return -1;
+        }
+
+        /* Display the hex code of each character received */
+        if (ctx->debug) {
+            int i;
+            for (i = 0; i < rc; i++)
+                printf("<%.2X>", msg[i]);
+            printf("\n");
+        }
+
+        if (ctx->data_received_callback && rc > 0) {
+            ctx->data_received_callback(msg, rc, msg_type, ctx->backend->getAddress(ctx), ctx->data_received_callback_user_data);
+        }
+        return ctx->backend->check_integrity(ctx, msg, rc);
+    }
+
+    /* TCP/RTU: stream-based, read step by step */
     /* Add a file descriptor to the set */
     FD_ZERO(&rset);
     FD_SET(ctx->s, &rset);
@@ -1821,7 +1874,7 @@ void _modbus_init_common(modbus_t *ctx)
 
     ctx->indication_timeout.tv_sec = 0;
     ctx->indication_timeout.tv_usec = 0;
-    
+
     ctx->data_received_callback = NULL;
 	ctx->data_received_callback_user_data = NULL;
     ctx->data_sent_callback = NULL;

@@ -295,9 +295,10 @@ MODBUS_API void modbus_register_data_received_callback(modbus_t *ctx,
                             dataCallback_t data_receive_callback, void* data_received_user_arg);
 MODBUS_API void modbus_register_data_sent_callback(modbus_t *ctx,
                             dataCallback_t data_send_callback, void* data_sent_user_arg);
-                                               
+
 #include "modbus-tcp.h"
 #include "modbus-rtu.h"
+#include "modbus-udp.h"
 
 MODBUS_END_DECLS
 
