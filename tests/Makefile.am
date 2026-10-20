@@ -10,6 +10,8 @@ noinst_PROGRAMS = \
 	unit-test-client \
 	version
 
+check_PROGRAMS = regression-udp-memory
+
 common_ldflags = \
 	$(top_builddir)/src/libmodbus.la
 
@@ -37,6 +39,9 @@ unit_test_client_LDADD = $(common_ldflags)
 version_SOURCES = version.c
 version_LDADD = $(common_ldflags)
 
+regression_udp_memory_SOURCES = regression-udp-memory.c
+regression_udp_memory_LDADD = $(common_ldflags) -lpthread
+
 AM_CPPFLAGS = \
     -include $(top_builddir)/config.h \
     -DSYSCONFDIR=\""$(sysconfdir)"\" \
@@ -49,4 +54,4 @@ AM_CFLAGS = ${my_CFLAGS}
 CLEANFILES = *~ *.log
 
 noinst_SCRIPTS=unit-tests.sh
-TESTS=./unit-tests.sh
+TESTS=./unit-tests.sh regression-udp-memory

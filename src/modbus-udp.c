@@ -45,6 +45,15 @@
 #define MSG_NOSIGNAL 0
 #endif
 
+/* MSG_TRUNC lets recvfrom() report a datagram's real size even when it does
+ * not fit in the supplied buffer (Linux/BSD); used to detect truncation
+ * instead of silently handing a partial datagram to the caller. Platforms
+ * that lack it (e.g. Windows, where recvfrom() already fails with
+ * WSAEMSGSIZE on a too-small buffer) get a harmless no-op flag. */
+#if !defined(MSG_TRUNC)
+#define MSG_TRUNC 0
+#endif
+
 #if defined(_AIX) && !defined(MSG_DONTWAIT)
 #define MSG_DONTWAIT MSG_NONBLOCK
 #endif
@@ -167,15 +176,41 @@ static ssize_t _modbus_udp_send(modbus_t *ctx, const uint8_t *req, int req_lengt
 }
 
 static int _modbus_udp_receive(modbus_t *ctx, uint8_t *req) {
-    return _modbus_receive_msg(ctx, req, MSG_INDICATION);
+    return _modbus_receive_msg(ctx, req, MODBUS_MAX_ADU_LENGTH, MSG_INDICATION);
 }
 
 static ssize_t _modbus_udp_recv(modbus_t *ctx, uint8_t *rsp, int rsp_length) {
     modbus_udp_t *ctx_udp = ctx->backend_data;
 
     ctx_udp->addr_len = sizeof(ctx_udp->addr);
-    return recvfrom(ctx->s, (char *)rsp, rsp_length, 0,
+    /* MSG_TRUNC (Linux) makes recvfrom() return the real datagram size even
+       when it is larger than rsp_length, instead of silently discarding the
+       excess bytes. _modbus_receive_msg() relies on this to detect and
+       reject truncated datagrams rather than processing a partial message.
+       On platforms without MSG_TRUNC the flag is a no-op (see the generic
+       fallback near the top of this file). */
+    return recvfrom(ctx->s, (char *)rsp, rsp_length, MSG_TRUNC,
                     (struct sockaddr *)&ctx_udp->addr, &ctx_udp->addr_len);
+}
+
+static int _modbus_udp_pi_receive(modbus_t *ctx, uint8_t *req) {
+    return _modbus_receive_msg(ctx, req, MODBUS_MAX_ADU_LENGTH, MSG_INDICATION);
+}
+
+static ssize_t _modbus_udp_pi_send(modbus_t *ctx, const uint8_t *req, int req_length)
+{
+    modbus_udp_pi_t *ctx_udp_pi = ctx->backend_data;
+
+    return sendto(ctx->s, (const char *)req, req_length, MSG_NOSIGNAL,
+                  (struct sockaddr *)&ctx_udp_pi->addr, ctx_udp_pi->addr_len);
+}
+
+static ssize_t _modbus_udp_pi_recv(modbus_t *ctx, uint8_t *rsp, int rsp_length) {
+    modbus_udp_pi_t *ctx_udp_pi = ctx->backend_data;
+
+    ctx_udp_pi->addr_len = sizeof(ctx_udp_pi->addr);
+    return recvfrom(ctx->s, (char *)rsp, rsp_length, MSG_TRUNC,
+                    (struct sockaddr *)&ctx_udp_pi->addr, &ctx_udp_pi->addr_len);
 }
 
 static int _modbus_udp_check_integrity(modbus_t *ctx, uint8_t *msg, const int msg_length)
@@ -708,9 +743,9 @@ const modbus_backend_t _modbus_udp_pi_backend = {
     _modbus_udp_build_response_basis,
     _modbus_udp_prepare_response_tid,
     _modbus_udp_send_msg_pre,
-    _modbus_udp_send,
-    _modbus_udp_receive,
-    _modbus_udp_recv,
+    _modbus_udp_pi_send,
+    _modbus_udp_pi_receive,
+    _modbus_udp_pi_recv,
     _modbus_udp_check_integrity,
     _modbus_udp_pre_check_confirmation,
     _modbus_udp_pi_connect,

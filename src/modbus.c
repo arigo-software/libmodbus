@@ -32,7 +32,8 @@ const unsigned int libmodbus_version_minor = LIBMODBUS_VERSION_MINOR;
 const unsigned int libmodbus_version_micro = LIBMODBUS_VERSION_MICRO;
 
 /* Max between RTU and TCP max adu length (so TCP) */
-#define MAX_MESSAGE_LENGTH 260
+/* Must be at least the largest backend max_adu_length (UDP: 512) */
+#define MAX_MESSAGE_LENGTH 512
 #define MAX_EXTENDED_PAYLOAD_LENGTH 512
 #define MAX_EXTENDED_PAYLOAD_OFFSET 10
 #define MAX_EXTENDED_MESSAGE_LENGTH (MAX_EXTENDED_PAYLOAD_LENGTH + MAX_EXTENDED_PAYLOAD_OFFSET)
@@ -384,7 +385,7 @@ static int compute_data_length_after_meta(modbus_t *ctx, uint8_t *msg,
    - read() or recv() error codes
 */
 
-int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
+int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, int msg_capacity, msg_type_t msg_type)
 {
     int rc;
     fd_set rset;
@@ -404,6 +405,18 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
 
     /* UDP is datagram-based - must read complete datagram in one call */
     if (ctx->backend->backend_type == _MODBUS_BACKEND_TYPE_UDP) {
+        /* The backend's max_adu_length is the largest datagram the protocol
+           allows, not the capacity of the buffer the caller actually gave
+           us: never ask recv() for more than msg_capacity, or a legitimate
+           (or oversized/garbage) datagram can overflow 'msg'. */
+        int recv_capacity = (msg_capacity < (int)ctx->backend->max_adu_length) ?
+            msg_capacity : (int)ctx->backend->max_adu_length;
+
+        if (recv_capacity <= 0) {
+            errno = EINVAL;
+            return -1;
+        }
+
         if (msg_type == MSG_INDICATION) {
             /* Wait for indication with select */
             tv.tv_sec = ctx->indication_timeout.tv_sec;
@@ -419,7 +432,7 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
         FD_ZERO(&rset);
         FD_SET(ctx->s, &rset);
 
-        rc = ctx->backend->select(ctx, &rset, p_tv, ctx->backend->max_adu_length);
+        rc = ctx->backend->select(ctx, &rset, p_tv, recv_capacity);
         if (rc == -1) {
             _error_print(ctx, "select");
             if (ctx->error_recovery & MODBUS_ERROR_RECOVERY_LINK) {
@@ -433,10 +446,26 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
             return -1;
         }
 
-        /* Read complete UDP datagram in one call */
-        rc = ctx->backend->recv(ctx, msg, ctx->backend->max_adu_length);
+        /* Read complete UDP datagram in one call. On platforms that
+           support MSG_TRUNC (see _modbus_udp_recv), a datagram larger than
+           recv_capacity is reported by its real size instead of being
+           silently truncated, which we detect and reject below instead of
+           processing a partial message. */
+        rc = ctx->backend->recv(ctx, msg, recv_capacity);
         if (rc == -1) {
             _error_print(ctx, "recv");
+            return -1;
+        }
+
+        if (rc > recv_capacity) {
+            /* The datagram did not fit in the buffer we offered: reject it
+               instead of silently continuing with a truncated message. */
+            if (ctx->debug) {
+                fprintf(stderr,
+                        "UDP datagram truncated: %d bytes received, only %d fit in the buffer\n",
+                        rc, recv_capacity);
+            }
+            errno = EMBBADDATA;
             return -1;
         }
 
@@ -548,7 +577,12 @@ int _modbus_receive_msg(modbus_t *ctx, uint8_t *msg, msg_type_t msg_type)
             case _STEP_META:
                 length_to_read = compute_data_length_after_meta(
                     ctx, msg, msg_type);
-                if ((msg_length + length_to_read) > (int)ctx->backend->max_adu_length) {
+                /* Never trust a declared length past either the protocol's
+                   own ADU limit or the real capacity of 'msg': the latter
+                   matters when a caller's buffer is smaller than the
+                   backend's max_adu_length. */
+                if ((msg_length + length_to_read) > (int)ctx->backend->max_adu_length ||
+                    (msg_length + length_to_read) > msg_capacity) {
                     errno = EMBBADDATA;
                     _error_print(ctx, "too many data");
                     return -1;
@@ -614,7 +648,7 @@ int modbus_receive_confirmation(modbus_t *ctx, uint8_t *rsp)
         return -1;
     }
 
-    return _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+    return _modbus_receive_msg(ctx, rsp, MODBUS_MAX_ADU_LENGTH, MSG_CONFIRMATION);
 }
 
 static int check_confirmation(modbus_t *ctx, uint8_t *req,
@@ -711,7 +745,26 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
             /* Report slave ID (bytes received) */
             req_nb_value = rsp_nb_value = rsp[offset + 1];
             break;
-        case MODBUS_FC_READ_OBJECT:
+        case MODBUS_FC_READ_OBJECT: {
+            /* Fixed part of a Read Object response: function + frameLength(2)
+               + version + type + field(2) + total(2) + read(2). A response
+               shorter than this (e.g. truncated or a short/garbage
+               datagram) must not be treated as valid data - reject it here
+               instead of letting modbus_read_objects() index into
+               uninitialized/undefined parts of 'rsp'. */
+            const int read_object_fixed_header_len = 11;
+
+            if (rsp_length < offset + read_object_fixed_header_len) {
+                if (ctx->debug) {
+                    fprintf(stderr,
+                            "Read Object response too short (%d bytes, need at least %d)\n",
+                            rsp_length, offset + read_object_fixed_header_len);
+                }
+                req_nb_value = 0;
+                rsp_nb_value = -1;
+                break;
+            }
+
             if (ctx->debug) {
                 printf("Read Object Response: [type %d] [offset %d] %.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X\n",
                         ctx->backend->backend_type, offset,
@@ -725,13 +778,25 @@ static int check_confirmation(modbus_t *ctx, uint8_t *req,
                     rsp[offset + 5]<<8 | rsp[offset + 6],
                     rsp[offset + 7]<<8 | rsp[offset + 8],
                     rsp[offset + 9]<<8 | rsp[offset + 10],
-                    rsp[offset + 11]<<8 | rsp[offset + 12],
-                    rsp[offset + 13], rsp[offset + 14]);
+                    (rsp_length > offset + 12) ? (rsp[offset + 11]<<8 | rsp[offset + 12]) : 0,
+                    (rsp_length > offset + 13) ? rsp[offset + 13] : 0,
+                    (rsp_length > offset + 14) ? rsp[offset + 14] : 0);
             }
             rsp_nb_value = frameLength;
             req_nb_value = rsp_nb_value;
             break;
+        }
         case MODBUS_FC_WRITE_OBJECT:
+            if (rsp_length < offset + 3) {
+                if (ctx->debug) {
+                    fprintf(stderr,
+                            "Write Object response too short (%d bytes, need at least %d)\n",
+                            rsp_length, offset + 3);
+                }
+                req_nb_value = 6;
+                rsp_nb_value = -1;
+                break;
+            }
             rsp_nb_value =  (rsp[offset + 1] << 8) | rsp[offset + 2];
             req_nb_value = 6;
             break;
@@ -1191,7 +1256,7 @@ static int read_io_status(modbus_t *ctx, int function,
         int offset;
         int offset_end;
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1300,7 +1365,7 @@ static int read_registers(modbus_t *ctx, int function, int addr, int nb,
         int offset;
         int i;
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1420,21 +1485,34 @@ int modbus_read_objects(modbus_t *ctx, uint8_t type,
     if (rc > 0) {
         int offset;
         int i;
+        int rsp_length;
+        int data_offset;
+        int available;
+        int print_count;
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
-        if (rc == -1)
+        rsp_length = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
+        if (rsp_length == -1)
             return -1;
 
-        rc = check_confirmation(ctx, req, rsp, rc);
+        rc = check_confirmation(ctx, req, rsp, rsp_length);
 
         if (rc == -1)
             return -1;
 
         offset = ctx->backend->header_length;
+        data_offset = 11;
+        /* Bytes actually available after the fixed object header, as
+           physically received - this is the only trustworthy bound for
+           reading out of 'rsp': the frameLength field below comes straight
+           off the wire and must never be used on its own to size a copy. */
+        available = rsp_length - offset - data_offset;
 
         if (ctx->debug) {
+            print_count = (rc < available) ? rc : available;
+            if (print_count < 0)
+                print_count = 0;
             printf("modbus_read_objects [type %d][offset %d] rc=%d :", ctx->backend->backend_type, offset, rc);
-            for (i = 0; i < rc; i++) {
+            for (i = 0; i < print_count; i++) {
                 printf("%.2X ",rsp[offset + i]);
             }
             printf("\n");
@@ -1446,16 +1524,41 @@ int modbus_read_objects(modbus_t *ctx, uint8_t type,
         uint16_t objField = (rsp[offset + 5] << 8) | rsp[offset + 6];
         uint16_t total = (rsp[offset + 7] << 8) | rsp[offset + 8];
         uint16_t read = (rsp[offset + 9] << 8) | rsp[offset + 10];
-        uint16_t first_ix = (rsp[offset + 11] << 8) | rsp[offset + 12];
-        uint8_t v0 = rsp[offset + 13];
-        uint8_t v1 = rsp[offset + 14];
+        uint16_t first_ix = (rsp_length > offset + 12) ? ((rsp[offset + 11] << 8) | rsp[offset + 12]) : 0;
         if (ctx->debug) {
+            uint8_t v0 = (rsp_length > offset + 13) ? rsp[offset + 13] : 0;
+            uint8_t v1 = (rsp_length > offset + 14) ? rsp[offset + 14] : 0;
             printf("modbus_read_objects rc=%d, func=%.2X frameLength=%d version=%d type=%d field=%d total=%d read=%d first_ix=%d v[0]=%.2X v[1]=%.2X\n",
                 rc, func, frameLength, version, objType, objField, total, read, first_ix, v0, v1);
         }
-        uint8_t data_offset = 11;
         rc -= data_offset;
         rc -= 1; // FIXME: not quite sure where we have got this additional byte in the calculation
+
+        /* 'rc' is derived from the wire-provided frameLength field and must
+           never be trusted on its own: clamp it against the number of bytes
+           actually received (avoids reading past 'rsp' on a truncated or
+           malformed datagram) and against the caller's destination capacity
+           (avoids overflowing 'dest', which is what previously let a
+           malformed/oversized Read Object response corrupt the caller's
+           heap regardless of 'len'). */
+        if (rc < 0 || available < 0 || rc > available) {
+            if (ctx->debug) {
+                fprintf(stderr,
+                        "ERROR Read Object response truncated or malformed "
+                        "(claims %d data bytes, %d actually available)\n",
+                        rc, available);
+            }
+            errno = EMBBADDATA;
+            return -1;
+        }
+
+        if (rc > (int)len) {
+            fprintf(stderr,
+                    "ERROR Read Object response (%d bytes) exceeds destination buffer (%d bytes)\n",
+                    rc, len);
+            errno = EMBMDATA;
+            return -1;
+        }
 
         for (i = 0; i < rc; i++) {
             dest[i] = rsp[offset + data_offset + i];
@@ -1523,7 +1626,7 @@ int modbus_write_objects(modbus_t *ctx, uint8_t type, uint16_t field, uint16_t o
     }
     if (rc > 0) {
         uint8_t rsp[MAX_MESSAGE_LENGTH];
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
         rc = check_confirmation(ctx, req, rsp, rc);
@@ -1552,7 +1655,7 @@ static int write_single(modbus_t *ctx, int function, int addr, const uint16_t va
         /* Used by write_bit and write_register */
         uint8_t rsp[MAX_MESSAGE_LENGTH];
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1637,7 +1740,7 @@ int modbus_write_bits(modbus_t *ctx, int addr, int nb, const uint8_t *src)
     if (rc > 0) {
         uint8_t rsp[MAX_MESSAGE_LENGTH];
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1687,7 +1790,7 @@ int modbus_write_registers(modbus_t *ctx, int addr, int nb, const uint16_t *src)
     if (rc > 0) {
         uint8_t rsp[MAX_MESSAGE_LENGTH];
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1723,7 +1826,7 @@ int modbus_mask_write_register(modbus_t *ctx, int addr, uint16_t and_mask, uint1
         /* Used by write_bit and write_register */
         uint8_t rsp[MAX_MESSAGE_LENGTH];
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1793,7 +1896,7 @@ int modbus_write_and_read_registers(modbus_t *ctx,
     if (rc > 0) {
         int offset;
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
@@ -1837,7 +1940,7 @@ int modbus_report_slave_id(modbus_t *ctx, int max_dest, uint8_t *dest)
         int offset;
         uint8_t rsp[MAX_MESSAGE_LENGTH];
 
-        rc = _modbus_receive_msg(ctx, rsp, MSG_CONFIRMATION);
+        rc = _modbus_receive_msg(ctx, rsp, sizeof(rsp), MSG_CONFIRMATION);
         if (rc == -1)
             return -1;
 
